@@ -34,13 +34,14 @@
     "AWS_EC2_METADATA_DISABLED": "true"
   },
   "postCreateCommand": "bash .devcontainer/scripts/post-create.sh",
+"postStartCommand": "bash .devcontainer/scripts/auto-update-teacher.sh",
   "waitFor": "postCreateCommand",
   "customizations": {
     "vscode": {
       "extensions": [
         "GitHub.copilot",
         "GitHub.copilot-chat",
-        "ms-python.python"
+       "ms-python.python"
       ],
       "settings": {
         "terminal.integrated.defaultProfile.linux": "bash",
