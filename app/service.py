@@ -293,10 +293,10 @@ document.getElementById("load").addEventListener("click", async () => {
                             {
                                 "event_id": row[0],
                                 "device_id": row[1],
-                                "observed_at": row[2].isoformat(),
+                                "observed_at": row[2],
                                 "type": row[3],
                                 **({"note": row[4]} if row[4] is not None else {}),
-                                "received_at": row[5].isoformat(),
+                                "received_at": row[5],
                             }
                         )
 
@@ -357,10 +357,10 @@ document.getElementById("load").addEventListener("click", async () => {
                     result = {
                         "event_id": row[0],
                         "device_id": row[1],
-                        "observed_at": row[2].isoformat(),
+                        "observed_at": row[2],
                         "type": row[3],
                         **({"note": row[4]} if row[4] is not None else {}),
-                        "received_at": row[5].isoformat(),
+                        "received_at": row[5],
                     }
 
                     self.send_json(200, result)
@@ -491,7 +491,7 @@ document.getElementById("load").addEventListener("click", async () => {
                 existing_event = {
                     "event_id": existing[0],
                     "device_id": existing[1],
-                    "observed_at": existing[2].isoformat(),
+                    "observed_at": existing[2],
                     "type": existing[3],
                     **({"note": existing[4]} if existing[4] is not None else {}),
                 }
@@ -499,7 +499,7 @@ document.getElementById("load").addEventListener("click", async () => {
                 incoming_event = dict(event)
 
                 if existing_event == incoming_event:
-                    existing_event["received_at"] = existing[5].isoformat()
+                    existing_event["received_at"] = existing[5]
                     self.send_json(200, existing_event)
                 else:
                     self.send_json(
