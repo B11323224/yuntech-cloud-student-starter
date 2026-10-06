@@ -1,0 +1,24 @@
+ README.md                                                         |   2 [32m+[m
+ app/service.py                                                    | 214 [32m+++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++[m
+ deploy/deploy.sh                                                  |  79 [32m+++++++++++++++++++++++++++++[m
+ deploy/down.sh                                                    |  61 [31m----------------------[m
+ deploy/make-user-data.sh                                          |  84 [32m+[m[31m-----------------------------[m
+ deploy/make_user_data.py                                          |  84 [32m++++++++++++++++++++++++++++++[m
+ deploy/nginx.conf                                                 |  18 [32m+++++++[m
+ deploy/resources.example.md                                       |  15 [32m++++++[m
+ deploy/target.py                                                  |  83 [32m++++++++++++++++++++++++++++++[m
+ deploy/up.sh                                                      |  96 [31m-----------------------------------[m
+ labs/03-service-prototype/README.md                               | 145 [32m++++++++++++++++++++++++++++++++++++++++++++++++++++[m
+ labs/04-web-api/README.md                                         | 145 [32m++++++++++++++++++++++++++++++++++++++++++++++++++++[m
+ practice/w2/hello.txt                                             |   1 [31m-[m
+ reports/TEMPLATE.md                                               |   2 [32m+[m[31m-[m
+ "reports/W04_\347\271\263\344\272\244\347\257\204\346\234\254.md" |  67 [32m++++++++++++++++++++++++[m
+ student-files.json                                                |   9 [32m++++[m
+ tests/fixtures/invalid_extra_field.json                           |   8 [32m+++[m
+ tests/fixtures/invalid_timezone.json                              |   7 [32m+++[m
+ tests/fixtures/valid_event.json                                   |   7 [32m+++[m
+ tests/rejection_matrix.py                                         | 119 [32m+++++++++++++++++++++++++++++++++++++++++++[m
+ tests/test_w03_service.py                                         |  48 [32m++++++++++++++++++[m
+ tests/test_w04_service.py                                         | 119 [32m+++++++++++++++++++++++++++++++++++++++++++[m
+ tests/test_w04_target.py                                          |  23 [32m+++++++++[m
+ 23 files changed, 1194 insertions(+), 242 deletions(-)

@@ -1,0 +1,324 @@
+diff --git a/deploy/aws_ops.py b/deploy/aws_ops.py
+new file mode 100644
+index 0000000..d9d4bf4
+--- /dev/null
++++ b/deploy/aws_ops.py
+@@ -0,0 +1,298 @@
++#!/usr/bin/env python3
++"""W3 deployment operations; all AWS calls go through scripts/lab.py."""
++import argparse
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import time
++from urllib.error import HTTPError, URLError
++from urllib.request import urlopen
++
++ROOT = Path(__file__).resolve().parents[1]
++sys.path.insert(0, str(ROOT / "scripts"))
++import lab
++
++REGION = "us-east-1"
++RESOURCE_FILE = ROOT / ".local" / "resources.json"
++BASE_TAGS = {"course": "yuntech-115-1", "week": "w03"}
++
++
++def aws(arguments):
++    return lab.run_aws(arguments, REGION)
++
++
++def write_resources(data):
++    RESOURCE_FILE.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
++    fd, temporary = tempfile.mkstemp(prefix=".resources-", dir=RESOURCE_FILE.parent)
++    try:
++        with os.fdopen(fd, "w", encoding="utf-8") as stream:
++            os.fchmod(stream.fileno(), 0o600)
++            json.dump(data, stream, indent=2, sort_keys=True)
++            stream.write("\n")
++        os.replace(temporary, RESOURCE_FILE)
++    finally:
++        if os.path.exists(temporary):
++            os.unlink(temporary)
++
++
++def read_resources():
++    if not RESOURCE_FILE.is_file():
++        raise SystemExit(f"找不到 {RESOURCE_FILE}; refusing AWS changes")
++    return json.loads(RESOURCE_FILE.read_text(encoding="utf-8"))
++
++
++def tag_specifications(tags, resource_types):
++    values = "[" + ",".join(f"{{Key={key},Value={value}}}" for key, value in tags.items()) + "]"
++    return [f"ResourceType={resource_type},Tags={values}" for resource_type in resource_types]
++
++
++def find_default_public_subnet(vpc_id):
++    subnets = aws(["ec2", "describe-subnets", "--filters", f"Name=vpc-id,Values={vpc_id}",
++                   "Name=default-for-az,Values=true"]).get("Subnets", [])
++    route_tables = aws(["ec2", "describe-route-tables", "--filters", f"Name=vpc-id,Values={vpc_id}"])
++    for subnet in sorted(subnets, key=lambda item: item["SubnetId"]):
++        selected = None
++        for table in route_tables.get("RouteTables", []):
++            associations = table.get("Associations", [])
++            if any(association.get("SubnetId") == subnet["SubnetId"] for association in associations):
++                selected = table
++                break
++            if selected is None and any(association.get("Main") for association in associations):
++                selected = table
++        if selected and any(route.get("DestinationCidrBlock") == "0.0.0.0/0"
++                            and route.get("GatewayId", "").startswith("igw-")
++                            for route in selected.get("Routes", [])):
++            return subnet, selected
++    raise SystemExit("找不到具有 IGW 預設路由的預設公有子網; no AWS changes made")
++
++
++def find_ami():
++    response = aws(["ec2", "describe-images", "--owners", "amazon", "--filters",
++                    "Name=name,Values=al2023-ami-2023*-x86_64",
++                    "Name=architecture,Values=x86_64", "Name=state,Values=available",
++                    "Name=root-device-type,Values=ebs", "Name=virtualization-type,Values=hvm"])
++    images = sorted(response.get("Images", []), key=lambda item: item.get("CreationDate", ""))
++    if not images:
++        raise SystemExit("找不到可用的 AL2023 x86_64 AMI; no AWS changes made")
++    return images[-1]
++
++
++def resource_tags(item):
++    return {tag["Key"]: tag["Value"] for tag in item.get("Tags", [])}
++
++
++def assert_tags(item, expected, label):
++    actual = resource_tags(item)
++    if any(actual.get(key) != value for key, value in expected.items()):
++        raise SystemExit(f"{label} tags mismatch; refusing AWS changes")
++
++
++def confirm_plan(vpc_id, subnet, ami, group, owner, source, sg_name, key_name, commit):
++    description = f"""將建立以下 W3 資源（帳號與區域已由 lab.py 驗證）：
++1. 1 個專用 Security Group：{sg_name}，VPC {vpc_id}，入站僅 TCP 22、80，來源 {source}
++2. 1 個匯入的 ed25519 key pair：{key_name}，私鑰只留在本機 ~/.ssh，不會讀取或提交
++3. 1 台 EC2：t3.micro，AMI {ami['ImageId']} ({ami.get('Name', 'AL2023 x86_64')})，子網 {subnet['SubnetId']}
++   根磁碟：加密 gp3、DeleteOnTermination=true；IMDSv2 required
++標籤：course={BASE_TAGS['course']}, week={BASE_TAGS['week']}, group={group}, owner={owner}
++部署 commit：{commit}
++回收方式：只依 .local/resources.json 的 ID，先核對標籤，再用 deploy/down.sh；保留用 deploy/down.sh --stop。
++確認網路暴露：沒有 8080、0.0.0.0/0 或 ::/0 入站規則。"""
++    lab.approve(description, "CREATE")
++
++
++def make_key(key_name):
++    path = Path.home() / ".ssh" / "id_ed25519"
++    path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
++    if not path.exists():
++        subprocess.run(["ssh-keygen", "-t", "ed25519", "-N", "", "-f", str(path)],
++                       check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
++    os.chmod(path, 0o600)
++    return path, key_name
++
++
++def health_check(public_ip, commit):
++    try:
++        with urlopen(f"http://{public_ip}/health", timeout=8) as response:
++            body = json.load(response)
++            if response.status != 200:
++                raise SystemExit(f"/health HTTP status is {response.status}")
++    except (HTTPError, URLError, TimeoutError) as exc:
++        raise SystemExit(f"/health validation failed: {type(exc).__name__}") from exc
++    expected = {"status": "ok", "service": "inspection", "version": commit}
++    if any(body.get(key) != value for key, value in expected.items()):
++        raise SystemExit("/health response failed the W3 contract")
++    print(json.dumps(body, sort_keys=True))
++
++
++def up(args):
++    context = lab.verify()
++    if context["region"] != REGION:
++        raise SystemExit(f"W3 requires {REGION}; verified region was {context['region']}")
++    if not args.source.endswith("/32"):
++        raise SystemExit("--source must be a single IPv4 address ending in /32")
++    commit = subprocess.check_output(["git", "rev-parse", "--verify", "--end-of-options",
++                                      args.commit + "^{commit}"], cwd=ROOT, text=True).strip()
++    tags = {**BASE_TAGS, "group": args.group, "owner": args.owner}
++    vpcs = aws(["ec2", "describe-vpcs", "--filters", "Name=isDefault,Values=true"]).get("Vpcs", [])
++    vpc = next((item for item in vpcs if item.get("IsDefault")), None)
++    if not vpc:
++        raise SystemExit("no default VPC; no AWS changes made")
++    subnet, route_table = find_default_public_subnet(vpc["VpcId"])
++    ami = find_ami()
++    sg_name = f"secgrp-w03-{args.group}-{args.owner}"
++    key_name = f"key-w03-{args.group}-{args.owner}"
++    confirm_plan(vpc["VpcId"], subnet, ami, args.group, args.owner, args.source,
++                 sg_name, key_name, commit)
++
++    user_data = ROOT / ".local" / "w03-user-data.sh"
++    if user_data.exists():
++        user_data.unlink()
++    subprocess.run(["bash", str(ROOT / "deploy" / "make-user-data.sh"), commit, str(user_data)],
++                   cwd=ROOT, check=True)
++    resources = {"group": args.group, "owner": args.owner, "source": args.source, "commit": commit,
++                 "vpc_id": vpc["VpcId"], "subnet_id": subnet["SubnetId"],
++                 "route_table_id": route_table["RouteTableId"], "ami_id": ami["ImageId"], "tags": tags}
++
++    security_group = aws(["ec2", "create-security-group", "--group-name", sg_name,
++                          "--description", f"W3 dedicated SG for {args.owner}", "--vpc-id", vpc["VpcId"],
++                          "--tag-specifications", *tag_specifications(tags, ["security-group"])])
++    resources["security_group_id"] = security_group["GroupId"]
++    write_resources(resources)
++    for port in (22, 80):
++        aws(["ec2", "authorize-security-group-ingress", "--group-id", resources["security_group_id"],
++             "--protocol", "tcp", "--port", str(port), "--cidr", args.source])
++
++    key_path, _ = make_key(key_name)
++    key = aws(["ec2", "import-key-pair", "--key-name", key_name,
++               "--public-key-material", f"fileb://{key_path}.pub",
++               "--tag-specifications", *tag_specifications(tags, ["key-pair"])])
++    resources.update({"key_name": key_name, "key_pair_id": key.get("KeyPairId", key_name)})
++    write_resources(resources)
++
++    instance_tags = {**tags, "Name": f"w03-inspection-{args.group}-{args.owner}"}
++    instance_result = aws(["ec2", "run-instances", "--image-id", ami["ImageId"],
++                           "--instance-type", "t3.micro", "--key-name", key_name,
++                           "--security-group-ids", resources["security_group_id"],
++                           "--subnet-id", subnet["SubnetId"], "--user-data", f"file://{user_data}",
++                           "--block-device-mappings",
++                           '[{"DeviceName":"/dev/xvda","Ebs":{"VolumeSize":8,"VolumeType":"gp3","Encrypted":true,"DeleteOnTermination":true}}]',
++                           "--metadata-options", "HttpTokens=required,HttpEndpoint=enabled",
++                           "--tag-specifications", *tag_specifications(instance_tags,
++                                                                        ["instance", "volume", "network-interface"])])
++    instance = instance_result["Instances"][0]
++    resources["instance_id"] = instance["InstanceId"]
++    write_resources(resources)
++    details = aws(["ec2", "describe-instances", "--instance-ids", instance["InstanceId"]])
++    current = details["Reservations"][0]["Instances"][0]
++    resources["root_volume_id"] = next(mapping["Ebs"]["VolumeId"]
++                                        for mapping in current["BlockDeviceMappings"]
++                                        if mapping.get("DeviceName") == current.get("RootDeviceName"))
++    resources["network_interface_ids"] = [item["NetworkInterfaceId"] for item in current["NetworkInterfaces"]]
++    write_resources(resources)
++    aws(["ec2", "wait", "instance-running", "--instance-ids", instance["InstanceId"]])
++    aws(["ec2", "wait", "instance-status-ok", "--instance-ids", instance["InstanceId"]])
++    current = aws(["ec2", "describe-instances", "--instance-ids", instance["InstanceId"]])["Reservations"][0]["Instances"][0]
++    public_ip = current.get("PublicIpAddress")
++    if not public_ip:
++        raise SystemExit("EC2 has no public IPv4; resource IDs remain in .local/resources.json")
++    resources["public_ip"] = public_ip
++    write_resources(resources)
++    health_check(public_ip, commit)
++
++
++def not_found(error):
++    return any(code in str(error) for code in
++               ("NotFound", "InvalidInstanceID", "InvalidGroup.NotFound", "InvalidKeyPair.NotFound"))
++
++
++def describe_by_id(operation, identifier, option):
++    try:
++        return aws(["ec2", operation, option, identifier])
++    except lab.LabError as exc:
++        if not_found(exc):
++            return None
++        raise
++
++
++def verify_resources(resources):
++    tags = resources["tags"]
++    instance = describe_by_id("describe-instances", resources["instance_id"], "--instance-ids")
++    if not instance or not instance.get("Reservations") or not instance["Reservations"][0].get("Instances"):
++        raise SystemExit("instance ID is missing; refusing AWS changes")
++    assert_tags(instance["Reservations"][0]["Instances"][0], tags, "instance")
++    security_group = describe_by_id("describe-security-groups", resources["security_group_id"], "--group-ids")
++    if not security_group or not security_group.get("SecurityGroups"):
++        raise SystemExit("security group ID is missing; refusing AWS changes")
++    assert_tags(security_group["SecurityGroups"][0], tags, "security group")
++    key = describe_by_id("describe-key-pairs", resources["key_pair_id"], "--key-pair-ids")
++    if not key or not key.get("KeyPairs"):
++        raise SystemExit("key pair ID is missing; refusing AWS changes")
++    assert_tags(key["KeyPairs"][0], tags, "key pair")
++    volume = describe_by_id("describe-volumes", resources["root_volume_id"], "--volume-ids")
++    if not volume or not volume.get("Volumes"):
++        raise SystemExit("root volume ID is missing; refusing AWS changes")
++    assert_tags(volume["Volumes"][0], tags, "root volume")
++    for network_interface in resources["network_interface_ids"]:
++        interface = describe_by_id("describe-network-interfaces", network_interface,
++                                   "--network-interface-ids")
++        if not interface or not interface.get("NetworkInterfaces"):
++            raise SystemExit("network interface ID is missing; refusing AWS changes")
++        assert_tags(interface["NetworkInterfaces"][0], tags, "network interface")
++
++
++def wait_missing(operation, identifier, option):
++    for _ in range(18):
++        if describe_by_id(operation, identifier, option) is None:
++            return
++        time.sleep(5)
++    raise SystemExit(f"資源仍存在: {operation} {identifier}")
++
++
++def down(args):
++    context = lab.verify()
++    if context["region"] != REGION:
++        raise SystemExit(f"W3 requires {REGION}; verified region was {context['region']}")
++    resources = read_resources()
++    verify_resources(resources)
++    instance_id = resources["instance_id"]
++    if args.stop:
++        aws(["ec2", "stop-instances", "--instance-ids", instance_id])
++        aws(["ec2", "wait", "instance-stopped", "--instance-ids", instance_id])
++        state = aws(["ec2", "describe-instances", "--instance-ids", instance_id])["Reservations"][0]["Instances"][0]["State"]["Name"]
++        if state != "stopped":
++            raise SystemExit(f"expected stopped, got {state}")
++        print("EC2 stopped; no other resources changed.")
++        return
++    lab.approve(f"將刪除 resources.json 中且標籤已核對的 EC2、根 EBS、ENI、SG、key pair：{instance_id} 等。", "DELETE")
++    aws(["ec2", "terminate-instances", "--instance-ids", instance_id])
++    aws(["ec2", "wait", "instance-terminated", "--instance-ids", instance_id])
++    wait_missing("describe-volumes", resources["root_volume_id"], "--volume-ids")
++    for network_interface in resources["network_interface_ids"]:
++        wait_missing("describe-network-interfaces", network_interface, "--network-interface-ids")
++    aws(["ec2", "delete-security-group", "--group-id", resources["security_group_id"]])
++    wait_missing("describe-security-groups", resources["security_group_id"], "--group-ids")
++    aws(["ec2", "delete-key-pair", "--key-pair-id", resources["key_pair_id"]])
++    wait_missing("describe-key-pairs", resources["key_pair_id"], "--key-pair-ids")
++    write_resources({**resources, "reclaimed": True})
++    print("EC2、根 EBS、ENI、Security Group、key pair 均已讀回不存在。")
++
++
++def main():
++    parser = argparse.ArgumentParser()
++    subparsers = parser.add_subparsers(dest="operation", required=True)
++    up_parser = subparsers.add_parser("up")
++    up_parser.add_argument("--group", required=True)
++    up_parser.add_argument("--owner", required=True)
++    up_parser.add_argument("--source", required=True)
++    up_parser.add_argument("--commit", default="HEAD")
++    down_parser = subparsers.add_parser("down")
++    down_parser.add_argument("--stop", action="store_true")
++    args = parser.parse_args()
++    (up if args.operation == "up" else down)(args)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/deploy/down.sh b/deploy/down.sh
+new file mode 100755
+index 0000000..fdd8b1d
+--- /dev/null
++++ b/deploy/down.sh
+@@ -0,0 +1,4 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++exec python3 "$(dirname "$0")/aws_ops.py" down "$@"
+diff --git a/deploy/up.sh b/deploy/up.sh
+new file mode 100755
+index 0000000..888843e
+--- /dev/null
++++ b/deploy/up.sh
+@@ -0,0 +1,4 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++exec python3 "$(dirname "$0")/aws_ops.py" up "$@"
