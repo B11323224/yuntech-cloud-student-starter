@@ -4,7 +4,7 @@ set -euo pipefail
 BASE_URL="http://52.54.195.141"
 EC2_HOST="52.54.195.141"
 SSH_KEY="/home/vscode/.ssh/id_ed25519"
-EVENT_ID="w5-demo-002"
+EVENT_ID="w5-demo-003"
 DEVICE_ID="w5-device01"
 OBSERVED_AT="2026-10-06T10:00:00+08:00"
 
