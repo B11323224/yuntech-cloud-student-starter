@@ -113,7 +113,7 @@ if [[ ! -f "$KEY_PATH" || -L "$KEY_PATH" || "$(stat -c '%a' "$KEY_PATH")" != "60
   exit 1
 fi
 
-USER_DATA=".local/w05-user-data-${COMMIT_SHA:0:12}.sh"
+USER_DATA=".local/w06-user-data-${COMMIT_SHA:0:12}.sh"
 
 if [[ -e "$USER_DATA" ]]; then
   echo "STOP: refusing to overwrite existing $USER_DATA." >&2
@@ -122,7 +122,7 @@ fi
 
 bash deploy/make-user-data.sh "$COMMIT_SHA" "$USER_DATA"
 
-printf 'W5 deployment plan\n'
+printf 'W6 deployment plan\n'
 printf '  instance: %s\n' "$INSTANCE_ID"
 printf '  region: %s\n' "$REGION"
 printf '  public IPv4: %s\n' "$PUBLIC_IP"
@@ -131,9 +131,9 @@ printf '  app secret: %s (mode 600; contents not displayed)\n' "$APP_SECRET_FILE
 printf '  DB secret: %s (mode 600; contents not displayed)\n' "$DB_SECRET_FILE"
 printf 'This updates one existing host; no security-group, IAM, or other AWS resource changes.\n'
 
-read -r -p 'After peer review, type DEPLOY W5 to continue: ' APPROVAL
+read -r -p 'After peer review, type DEPLOY W6 to continue: ' APPROVAL
 
-if [[ "$APPROVAL" != "DEPLOY W5" ]]; then
+if [[ "$APPROVAL" != "DEPLOY W6" ]]; then
   echo "Cancelled; no SSH deployment was attempted."
   exit 1
 fi
@@ -149,6 +149,18 @@ SSH_TARGET="ec2-user@$PUBLIC_IP"
 
 ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" 'sudo bash -s' < "$USER_DATA"
 
+# W6: install the consumer certificate files with restricted permissions.
+ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" \
+  'sudo install -d -o inspection -g inspection -m 700 /etc/inspection/iot'
+
+tar -C .local/iot -cf - \
+  AmazonRootCA1.pem consumer.cert.pem consumer.private.key \
+  | ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" \
+    'sudo tar -xf - -C /etc/inspection/iot &&
+     sudo chown inspection:inspection /etc/inspection/iot/AmazonRootCA1.pem /etc/inspection/iot/consumer.cert.pem /etc/inspection/iot/consumer.private.key &&
+     sudo chmod 600 /etc/inspection/iot/AmazonRootCA1.pem /etc/inspection/iot/consumer.cert.pem /etc/inspection/iot/consumer.private.key &&
+     sudo chmod 755 /etc/inspection'
+
 TEMP_REMOTE_ENV="$(mktemp)"
 trap 'rm -f "$TEMP_REMOTE_ENV"' EXIT
 chmod 600 "$TEMP_REMOTE_ENV"
@@ -156,9 +168,18 @@ chmod 600 "$TEMP_REMOTE_ENV"
 cat "$APP_SECRET_FILE" > "$TEMP_REMOTE_ENV"
 printf '\n' >> "$TEMP_REMOTE_ENV"
 cat "$DB_SECRET_FILE" >> "$TEMP_REMOTE_ENV"
+cat >> "$TEMP_REMOTE_ENV" <<'IOT_ENV'
+IOT_ENDPOINT=a1srg1eun01hq8-ats.iot.us-east-1.amazonaws.com
+IOT_TOPIC=cxe/group5-Qiao/gw/events
+IOT_CLIENT_ID=consumer-group5-Qiao
+IOT_DEVICE_IDS=group5-Qiao-d01,group5-Qiao-d02,group5-Qiao-d03,group5-Qiao-d04,group5-Qiao-d05,group5-Qiao-d06,group5-Qiao-d07,group5-Qiao-d08,group5-Qiao-d09,group5-Qiao-d10
+IOT_CA=/etc/inspection/iot/AmazonRootCA1.pem
+IOT_CERT=/etc/inspection/iot/consumer.cert.pem
+IOT_KEY=/etc/inspection/iot/consumer.private.key
+IOT_ENV
 
 ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" \
-  'sudo sh -c '"'"'umask 077; mkdir -p /etc/inspection; cat > /etc/inspection/app.env; chown root:root /etc/inspection/app.env; chmod 600 /etc/inspection/app.env; systemctl restart inspection'"'"'' \
+  'sudo sh -c '"'"'umask 077; chmod 755 /etc/inspection; cat > /etc/inspection/app.env; chown root:root /etc/inspection/app.env; chmod 600 /etc/inspection/app.env; systemctl restart inspection; systemctl restart inspection-consumer'"'"'' \
   < "$TEMP_REMOTE_ENV"
 
 HEALTH="$(
@@ -188,7 +209,26 @@ if health.get("db_configured") is not True:
     )
 
 print(
-    "W5 deployment verified: version, auth_configured "
+    "W6 deployment verified: version, auth_configured "
     "and db_configured are correct."
 )
 PY
+
+# W6: verify service states and IoT credential permissions.
+ssh "${SSH_OPTIONS[@]}" "$SSH_TARGET" 'sudo bash -s' <<'REMOTE_CHECK'
+set -euo pipefail
+
+echo "=== service states ==="
+sudo systemctl is-active inspection inspection-consumer
+
+echo "=== IoT credential permissions ==="
+sudo stat -c '%U:%G %a %n' \
+  /etc/inspection/iot \
+  /etc/inspection/iot/AmazonRootCA1.pem \
+  /etc/inspection/iot/consumer.cert.pem \
+  /etc/inspection/iot/consumer.private.key \
+  /etc/inspection/app.env
+
+echo "=== recent consumer logs ==="
+sudo journalctl -u inspection-consumer -n 5 --no-pager
+REMOTE_CHECK

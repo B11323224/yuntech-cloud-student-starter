@@ -6,6 +6,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 import re
 import psycopg2
 from psycopg2 import IntegrityError
@@ -217,6 +218,10 @@ def make_server(version_file, port=8080, reporter_token=None, operator_token=Non
 Operator token:
 <input id="token" type="password">
 </label>
+<label>
+設備編號：
+<input id="device_id" type="text" placeholder="例如 group5-Qiao-d01">
+</label>
 <button id="load">Load</button>
 <pre id="output"></pre>
 
@@ -226,8 +231,15 @@ const output = document.getElementById("output");
 
 document.getElementById("load").addEventListener("click", async () => {
     const token = tokenInput.value;
+    const deviceId = document.getElementById("device_id").value.trim();
+    const query = new URLSearchParams();
 
-    const response = await fetch("/events", {
+    if (deviceId) {
+        query.set("device_id", deviceId);
+    }
+
+    const url = "/events" + (query.toString() ? "?" + query.toString() : "");
+    const response = await fetch(url, {
         headers: {
             "Authorization": "Bearer " + token
         }
@@ -254,7 +266,7 @@ document.getElementById("load").addEventListener("click", async () => {
                 self.wfile.write(data)
                 return
 
-            if self.path == "/events":
+            if urlsplit(self.path).path == "/events":
                 if not self.auth(operator_token):
                     return
 
@@ -276,9 +288,16 @@ document.getElementById("load").addEventListener("click", async () => {
                                        note,
                                        received_at
                                 FROM events
+                                WHERE (%s = '' OR device_id = %s)
                                 ORDER BY received_at DESC
                                 LIMIT 50
-                                """
+                                """,
+                                (
+                                    parse_qs(urlsplit(self.path).query)
+                                    .get("device_id", [""])[0].strip(),
+                                    parse_qs(urlsplit(self.path).query)
+                                    .get("device_id", [""])[0].strip(),
+                                ),
                             )
 
                             rows = cur.fetchall()
