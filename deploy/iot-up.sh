@@ -167,13 +167,13 @@ CONSUMER_POLICY="cxe-${CODE}-consumer"
 GW_DOC="$IOT_DIR/.gw-policy.json"
 CONSUMER_DOC="$IOT_DIR/.consumer-policy.json"
 
-ACCOUNT_ID="$ACCOUNT_ID" CODE="$CODE" python3 - <<'PY'
+ACCOUNT_ID="$ACCOUNT_ID" IOT_CODE="$CODE" python3 - <<'PY'
 import json, os
 from pathlib import Path
 
 d = Path(".local/iot")
 account = os.environ["ACCOUNT_ID"]
-code = os.environ["CODE"]
+code = os.environ["IOT_CODE"]
 base = f"arn:aws:iot:us-east-1:{account}:"
 
 docs = {
